@@ -34,3 +34,4 @@ dist/
 build/
 bin/
 /sb-manager
+!.env.example
