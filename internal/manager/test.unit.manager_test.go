@@ -52,7 +52,7 @@ func TestStartAllSendsDependencyPayloads(t *testing.T) {
 			"  fi\n"+
 			"done")
 
-	m := New(dir)
+	m := New(dir, "")
 	m.binaries["messenger"] = discovery.Binary{
 		Path:     filepath.Join(dir, "messenger"),
 		Manifest: mustManifest(t, `{"id":"messenger","kind":"service","contractVersion":1}`),
@@ -79,7 +79,7 @@ func TestStartAllSendsDependencyPayloads(t *testing.T) {
 }
 
 func TestTopoSortRejectsMissingDependency(t *testing.T) {
-	m := New(t.TempDir())
+	m := New(t.TempDir(), "")
 	m.binaries["plugin"] = discovery.Binary{
 		Path:     "/tmp/plugin",
 		Manifest: mustManifest(t, `{"id":"plugin","kind":"plugin","contractVersion":1,"dependsOn":["messenger"]}`),

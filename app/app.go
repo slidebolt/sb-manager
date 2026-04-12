@@ -11,7 +11,8 @@ import (
 )
 
 type Config struct {
-	BinDir string
+	BinDir      string
+	OverrideDir string
 }
 
 func Run(cfg Config) {
@@ -22,7 +23,7 @@ func Run(cfg Config) {
 	slog.SetDefault(logger)
 	log.SetFlags(0)
 
-	m := managercore.New(cfg.BinDir)
+	m := managercore.New(cfg.BinDir, cfg.OverrideDir)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
