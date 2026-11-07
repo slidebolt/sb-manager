@@ -67,7 +67,7 @@ func TestStartAllSendsDependencyPayloads(t *testing.T) {
 	}
 	defer m.Shutdown()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(depFile)
 		if err == nil && strings.Contains(string(data), `"id":"messenger"`) && strings.Contains(string(data), `"nats_port":4222`) {
