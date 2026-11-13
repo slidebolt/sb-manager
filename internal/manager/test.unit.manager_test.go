@@ -91,6 +91,15 @@ func TestTopoSortRejectsMissingDependency(t *testing.T) {
 	}
 }
 
+func TestStatusDoesNotInferReadyFromDiscovery(t *testing.T) {
+	m := New(t.TempDir(), "")
+	m.binaries["plugin-tv"] = discovery.Binary{Manifest: mustManifest(t, `{"id":"plugin-tv","kind":"plugin","contractVersion":1,"dependsOn":["storage"]}`)}
+	got := m.Status()
+	if len(got) != 1 || got[0].ID != "plugin-tv" || got[0].State != "stopped" {
+		t.Fatalf("unexpected status: %#v", got)
+	}
+}
+
 func mustManifest(t *testing.T, raw string) contract.HelloResponse {
 	t.Helper()
 	var m contract.HelloResponse

@@ -61,7 +61,9 @@ type Process struct {
 	// Done is closed when the process exits.
 	Done chan struct{}
 	// Err holds the exit error, if any.
-	Err error
+	Err       error
+	StartedAt time.Time
+	ReadyAt   time.Time
 
 	// OnMessage is called for each runtime message from the binary.
 	OnMessage func(contract.RuntimeMessage)
@@ -85,6 +87,19 @@ func (p *Process) State() State {
 	return p.state
 }
 
+type Snapshot struct {
+	State     State
+	StartedAt time.Time
+	ReadyAt   time.Time
+	Err       error
+}
+
+func (p *Process) Snapshot() Snapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return Snapshot{State: p.state, StartedAt: p.StartedAt, ReadyAt: p.ReadyAt, Err: p.Err}
+}
+
 // Start launches the binary's start command.
 func (p *Process) Start(ctx context.Context) error {
 	p.mu.Lock()
@@ -98,6 +113,8 @@ func (p *Process) Start(ctx context.Context) error {
 	p.Ready = make(chan struct{})
 	p.Done = make(chan struct{})
 	p.Err = nil
+	p.StartedAt = time.Now().UTC()
+	p.ReadyAt = time.Time{}
 
 	cmd := exec.CommandContext(ctx, p.Path, "start")
 
@@ -201,6 +218,7 @@ func (p *Process) readOutput(r io.Reader) {
 				p.mu.Lock()
 				p.Payload = msg.Payload
 				p.state = StateRunning
+				p.ReadyAt = time.Now().UTC()
 				p.mu.Unlock()
 				close(p.Ready)
 			})

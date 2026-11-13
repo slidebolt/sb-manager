@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ type Manager struct {
 	processes map[string]*process.Process // keyed by binary ID
 	binaries  map[string]discovery.Binary // keyed by binary ID
 	modTimes  map[string]time.Time        // keyed by file path
+	restarts  map[string]int              // keyed by binary ID
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -45,9 +47,46 @@ func New(binDir, overrideDir string) *Manager {
 		processes:   make(map[string]*process.Process),
 		binaries:    make(map[string]discovery.Binary),
 		modTimes:    make(map[string]time.Time),
+		restarts:    make(map[string]int),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+}
+
+// ComponentStatus is a read-only, provider-neutral view of one managed binary.
+type ComponentStatus struct {
+	ID              string    `json:"id"`
+	Kind            string    `json:"kind"`
+	State           string    `json:"state"`
+	ContractVersion int       `json:"contractVersion"`
+	Dependencies    []string  `json:"dependencies,omitempty"`
+	StartedAt       time.Time `json:"startedAt,omitempty"`
+	ReadyAt         time.Time `json:"readyAt,omitempty"`
+	RestartCount    int       `json:"restartCount"`
+	LastError       string    `json:"lastError,omitempty"`
+}
+
+// Status returns a point-in-time snapshot without exposing process controls.
+func (m *Manager) Status() []ComponentStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]ComponentStatus, 0, len(m.binaries))
+	for id, bin := range m.binaries {
+		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id]}
+		if p, ok := m.processes[id]; ok {
+			ps := p.Snapshot()
+			s.State, s.StartedAt, s.ReadyAt = ps.State.String(), ps.StartedAt, ps.ReadyAt
+			if ps.State == process.StateRunning {
+				s.State = "ready"
+			}
+			if ps.Err != nil {
+				s.LastError = ps.Err.Error()
+			}
+		}
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // Run performs initial discovery and starts all binaries, then watches
@@ -284,6 +323,9 @@ func (m *Manager) monitorCrash(id string, p *process.Process) {
 		return // Manager is shutting down, don't restart.
 	}
 	if p.State() == process.StateFailed {
+		m.mu.Lock()
+		m.restarts[id]++
+		m.mu.Unlock()
 		slog.Warn("crashed, restarting", "id", id)
 		time.Sleep(1 * time.Second)
 		if err := m.startBinary(id); err != nil {
