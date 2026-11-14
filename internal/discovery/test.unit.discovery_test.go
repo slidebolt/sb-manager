@@ -47,3 +47,13 @@ func TestScanReportsInvalidManifest(t *testing.T) {
 		t.Fatalf("errs: got %d want 1", len(errs))
 	}
 }
+
+func TestScanAcceptsFreePortSetupGenerator(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, dir, "api", "#!/bin/sh\nif [ \"$1\" = hello ]; then\ncat <<'EOF'\n{\"id\":\"api\",\"kind\":\"service\",\"contractVersion\":1,\"setup\":{\"mode\":\"required\",\"category\":\"Core\",\"fields\":[{\"key\":\"port\",\"environment\":\"SB_API_PORT\",\"name\":\"API port\",\"control\":\"text\",\"generate\":\"free_port\"}]}}\nEOF\nfi\n")
+
+	bins, errs := Scan(context.Background(), dir)
+	if len(errs) != 0 || len(bins) != 1 || bins[0].Manifest.ID != "api" {
+		t.Fatalf("Scan() bins=%#v errs=%v", bins, errs)
+	}
+}

@@ -100,6 +100,16 @@ func TestStatusDoesNotInferReadyFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestDiscoverFailsWhenAnExecutableManifestIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	writeManagedBinary(t, dir, "valid", `{"id":"valid","kind":"service","contractVersion":1}`, "printf '{\"type\":\"ready\"}\\n'")
+	writeManagedBinary(t, dir, "invalid", `{"id":"","kind":"service","contractVersion":1}`, "exit 0")
+	m := New(dir, "")
+	if err := m.discover(); err == nil {
+		t.Fatal("discover() = nil, want invalid component error")
+	}
+}
+
 func TestComponentEnvironmentIsScopedToTargetProcess(t *testing.T) {
 	dir := t.TempDir()
 	valueFile := filepath.Join(dir, "value")

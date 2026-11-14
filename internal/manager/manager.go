@@ -5,6 +5,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -165,11 +166,13 @@ func (m *Manager) discover() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	var discoveryErrors []error
 	if m.overrideDir != "" {
 		overrideBins, errs := discovery.Scan(m.ctx, m.overrideDir)
 		for _, err := range errs {
 			slog.Warn("override discovery warning", "error", err)
 		}
+		discoveryErrors = append(discoveryErrors, errs...)
 		for _, bin := range overrideBins {
 			m.binaries[bin.Manifest.ID] = bin
 			if info, err := os.Stat(bin.Path); err == nil {
@@ -183,6 +186,7 @@ func (m *Manager) discover() error {
 	for _, err := range errs {
 		slog.Warn("discovery warning", "error", err)
 	}
+	discoveryErrors = append(discoveryErrors, errs...)
 
 	for _, bin := range canonicalBins {
 		if _, exists := m.binaries[bin.Manifest.ID]; exists {
@@ -201,7 +205,9 @@ func (m *Manager) discover() error {
 		slog.Warn("no binaries found", "dir", m.binDir)
 	}
 	slog.Info("manager: discover pass finished", "duration", time.Since(started).Round(time.Millisecond), "binaries", len(m.binaries))
-
+	if len(discoveryErrors) > 0 {
+		return fmt.Errorf("manager: component discovery failed: %w", errors.Join(discoveryErrors...))
+	}
 	return nil
 }
 
