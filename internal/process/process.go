@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +50,7 @@ func (s State) String() string {
 type Process struct {
 	ID   string
 	Path string
+	env  map[string]string
 
 	mu    sync.Mutex
 	state State
@@ -71,9 +74,20 @@ type Process struct {
 
 // New creates a new Process (not yet started).
 func New(id, path string) *Process {
+	return NewWithEnvironment(id, path, nil)
+}
+
+// NewWithEnvironment creates a process with component-scoped environment
+// overrides. Values are never logged or placed on the command line.
+func NewWithEnvironment(id, path string, environment map[string]string) *Process {
+	env := make(map[string]string, len(environment))
+	for key, value := range environment {
+		env[key] = value
+	}
 	return &Process{
 		ID:    id,
 		Path:  path,
+		env:   env,
 		state: StateStopped,
 		Ready: make(chan struct{}),
 		Done:  make(chan struct{}),
@@ -117,6 +131,7 @@ func (p *Process) Start(ctx context.Context) error {
 	p.ReadyAt = time.Time{}
 
 	cmd := exec.CommandContext(ctx, p.Path, "start")
+	cmd.Env = mergeEnvironment(os.Environ(), p.env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -156,6 +171,31 @@ func (p *Process) Start(ctx context.Context) error {
 	go p.waitExit()
 
 	return nil
+}
+
+func mergeEnvironment(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, item := range base {
+		key := item
+		if i := strings.IndexByte(item, '='); i >= 0 {
+			key = item[:i]
+		}
+		if _, replaced := overrides[key]; !replaced {
+			out = append(out, item)
+		}
+	}
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		out = append(out, key+"="+overrides[key])
+	}
+	return out
 }
 
 // SendDependency sends a dependency payload to the binary over stdin.

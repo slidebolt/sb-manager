@@ -16,6 +16,30 @@ type Config struct {
 	BinDir      string
 	OverrideDir string
 	StatusAddr  string
+	Components  map[string]ComponentConfig
+}
+
+type ComponentConfig struct {
+	Environment map[string]string `json:"environment,omitempty"`
+}
+
+type RuntimeConfig struct {
+	Components map[string]ComponentConfig `json:"components,omitempty"`
+}
+
+func LoadRuntimeConfig(path string) (RuntimeConfig, error) {
+	if path == "" {
+		return RuntimeConfig{}, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	var cfg RuntimeConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return RuntimeConfig{}, err
+	}
+	return cfg, nil
 }
 
 func Run(cfg Config) {
@@ -26,7 +50,11 @@ func Run(cfg Config) {
 	slog.SetDefault(logger)
 	log.SetFlags(0)
 
-	m := managercore.New(cfg.BinDir, cfg.OverrideDir)
+	environment := make(map[string]map[string]string, len(cfg.Components))
+	for id, component := range cfg.Components {
+		environment[id] = component.Environment
+	}
+	m := managercore.NewWithEnvironment(cfg.BinDir, cfg.OverrideDir, environment)
 	var statusServer *http.Server
 	if cfg.StatusAddr != "" {
 		mux := http.NewServeMux()

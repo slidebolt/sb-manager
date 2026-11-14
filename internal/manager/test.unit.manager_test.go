@@ -100,6 +100,32 @@ func TestStatusDoesNotInferReadyFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestComponentEnvironmentIsScopedToTargetProcess(t *testing.T) {
+	dir := t.TempDir()
+	valueFile := filepath.Join(dir, "value")
+	writeManagedBinary(t, dir, "plugin",
+		`{"id":"plugin","kind":"service","contractVersion":1}`,
+		"printf '%s' \"$PLUGIN_SECRET\" > '"+valueFile+"'\n"+
+			"printf '{\"type\":\"ready\"}\\n'\n"+
+			"while IFS= read -r line; do case \"$line\" in *shutdown*) exit 0;; esac; done")
+
+	m := NewWithEnvironment(dir, "", map[string]map[string]string{"plugin": {"PLUGIN_SECRET": "scoped-value"}})
+	if err := m.discover(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.startAll(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	data, err := os.ReadFile(valueFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "scoped-value" {
+		t.Fatalf("component environment = %q", data)
+	}
+}
+
 func mustManifest(t *testing.T, raw string) contract.HelloResponse {
 	t.Helper()
 	var m contract.HelloResponse

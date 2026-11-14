@@ -28,6 +28,7 @@ const (
 type Manager struct {
 	binDir      string
 	overrideDir string
+	environment map[string]map[string]string
 
 	mu        sync.Mutex
 	processes map[string]*process.Process // keyed by binary ID
@@ -41,10 +42,17 @@ type Manager struct {
 
 // New creates a Manager watching the given bin directory and optional override directory.
 func New(binDir, overrideDir string) *Manager {
+	return NewWithEnvironment(binDir, overrideDir, nil)
+}
+
+// NewWithEnvironment creates a manager with component-scoped environment
+// values supplied by an owning launcher such as SlideBolt Quickstart.
+func NewWithEnvironment(binDir, overrideDir string, environment map[string]map[string]string) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		binDir:      binDir,
 		overrideDir: overrideDir,
+		environment: environment,
 		processes:   make(map[string]*process.Process),
 		binaries:    make(map[string]discovery.Binary),
 		modTimes:    make(map[string]time.Time),
@@ -275,7 +283,7 @@ func (m *Manager) startBinary(id string) error {
 		return fmt.Errorf("unknown binary %s", id)
 	}
 
-	p := process.New(id, bin.Path)
+	p := process.NewWithEnvironment(id, bin.Path, m.environment[id])
 	slog.Info("starting", "id", id)
 
 	if err := p.Start(m.ctx); err != nil {
