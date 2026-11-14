@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	contract "github.com/slidebolt/sb-contract"
 	"github.com/slidebolt/sb-manager/internal/discovery"
 	"github.com/slidebolt/sb-manager/internal/process"
 )
@@ -55,15 +56,16 @@ func New(binDir, overrideDir string) *Manager {
 
 // ComponentStatus is a read-only, provider-neutral view of one managed binary.
 type ComponentStatus struct {
-	ID              string    `json:"id"`
-	Kind            string    `json:"kind"`
-	State           string    `json:"state"`
-	ContractVersion int       `json:"contractVersion"`
-	Dependencies    []string  `json:"dependencies,omitempty"`
-	StartedAt       time.Time `json:"startedAt,omitempty"`
-	ReadyAt         time.Time `json:"readyAt,omitempty"`
-	RestartCount    int       `json:"restartCount"`
-	LastError       string    `json:"lastError,omitempty"`
+	ID              string                      `json:"id"`
+	Kind            string                      `json:"kind"`
+	State           string                      `json:"state"`
+	ContractVersion int                         `json:"contractVersion"`
+	Dependencies    []string                    `json:"dependencies,omitempty"`
+	StartedAt       time.Time                   `json:"startedAt,omitempty"`
+	ReadyAt         time.Time                   `json:"readyAt,omitempty"`
+	RestartCount    int                         `json:"restartCount"`
+	LastError       string                      `json:"lastError,omitempty"`
+	Definitions     *contract.PluginDefinitions `json:"definitions,omitempty"`
 }
 
 // Status returns a point-in-time snapshot without exposing process controls.
@@ -72,7 +74,7 @@ func (m *Manager) Status() []ComponentStatus {
 	defer m.mu.Unlock()
 	out := make([]ComponentStatus, 0, len(m.binaries))
 	for id, bin := range m.binaries {
-		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id]}
+		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id], Definitions: bin.Manifest.Definitions}
 		if p, ok := m.processes[id]; ok {
 			ps := p.Snapshot()
 			s.State, s.StartedAt, s.ReadyAt = ps.State.String(), ps.StartedAt, ps.ReadyAt
