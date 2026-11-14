@@ -17,6 +17,7 @@ import (
 	contract "github.com/slidebolt/sb-contract"
 	"github.com/slidebolt/sb-manager/internal/discovery"
 	"github.com/slidebolt/sb-manager/internal/process"
+	runtimehost "github.com/slidebolt/sb-runtime"
 )
 
 const (
@@ -36,6 +37,8 @@ type Manager struct {
 	binaries  map[string]discovery.Binary // keyed by binary ID
 	modTimes  map[string]time.Time        // keyed by file path
 	restarts  map[string]int              // keyed by binary ID
+	tools     map[string][]ToolStatus
+	blocked   map[string]string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -50,6 +53,9 @@ func New(binDir, overrideDir string) *Manager {
 // values supplied by an owning launcher such as SlideBolt Quickstart.
 func NewWithEnvironment(binDir, overrideDir string, environment map[string]map[string]string) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
+	if environment == nil {
+		environment = map[string]map[string]string{}
+	}
 	return &Manager{
 		binDir:      binDir,
 		overrideDir: overrideDir,
@@ -58,9 +64,20 @@ func NewWithEnvironment(binDir, overrideDir string, environment map[string]map[s
 		binaries:    make(map[string]discovery.Binary),
 		modTimes:    make(map[string]time.Time),
 		restarts:    make(map[string]int),
+		tools:       make(map[string][]ToolStatus),
+		blocked:     make(map[string]string),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+}
+
+type ToolStatus struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Required bool   `json:"required"`
+	Healthy  bool   `json:"healthy"`
+	Path     string `json:"path,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // ComponentStatus is a read-only, provider-neutral view of one managed binary.
@@ -75,6 +92,7 @@ type ComponentStatus struct {
 	RestartCount    int                         `json:"restartCount"`
 	LastError       string                      `json:"lastError,omitempty"`
 	Definitions     *contract.PluginDefinitions `json:"definitions,omitempty"`
+	Tools           []ToolStatus                `json:"tools,omitempty"`
 }
 
 // Status returns a point-in-time snapshot without exposing process controls.
@@ -83,7 +101,10 @@ func (m *Manager) Status() []ComponentStatus {
 	defer m.mu.Unlock()
 	out := make([]ComponentStatus, 0, len(m.binaries))
 	for id, bin := range m.binaries {
-		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id], Definitions: bin.Manifest.Definitions}
+		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id], Definitions: bin.Manifest.Definitions, Tools: append([]ToolStatus(nil), m.tools[id]...)}
+		if reason := m.blocked[id]; reason != "" {
+			s.State, s.LastError = "blocked", reason
+		}
 		if p, ok := m.processes[id]; ok {
 			ps := p.Snapshot()
 			s.State, s.StartedAt, s.ReadyAt = ps.State.String(), ps.StartedAt, ps.ReadyAt
@@ -271,6 +292,14 @@ func (m *Manager) startAll() error {
 	}
 
 	for _, id := range order {
+		if reason := m.blockedDependency(id); reason != "" {
+			m.setBlocked(id, reason)
+			continue
+		}
+		if blocked := m.resolveComponentTools(id); blocked != "" {
+			m.setBlocked(id, blocked)
+			continue
+		}
 		if err := m.startBinary(id); err != nil {
 			return fmt.Errorf("manager: start %s: %w", id, err)
 		}
@@ -278,6 +307,62 @@ func (m *Manager) startAll() error {
 	slog.Info("manager: startAll finished", "duration", time.Since(started).Round(time.Millisecond), "count", len(order))
 
 	return nil
+}
+
+func (m *Manager) blockedDependency(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, dependency := range m.binaries[id].Manifest.DependsOn {
+		if reason := m.blocked[dependency]; reason != "" {
+			return fmt.Sprintf("dependency %s is blocked: %s", dependency, reason)
+		}
+	}
+	return ""
+}
+
+func (m *Manager) setBlocked(id, reason string) {
+	m.mu.Lock()
+	m.blocked[id] = reason
+	m.mu.Unlock()
+	slog.Error("component blocked", "id", id, "error", reason)
+}
+
+func (m *Manager) resolveComponentTools(id string) string {
+	m.mu.Lock()
+	bin := m.binaries[id]
+	environment := m.environment[id]
+	if environment == nil {
+		environment = map[string]string{}
+		m.environment[id] = environment
+	}
+	m.mu.Unlock()
+	if bin.Manifest.Setup == nil || len(bin.Manifest.Setup.Tools) == 0 {
+		return ""
+	}
+	statuses := make([]ToolStatus, 0, len(bin.Manifest.Setup.Tools))
+	var requiredErrors []error
+	for _, requirement := range bin.Manifest.Setup.Tools {
+		ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+		resolution, err := runtimehost.ResolveTool(ctx, requirement, environment[requirement.Environment])
+		cancel()
+		status := ToolStatus{ID: requirement.ID, Name: requirement.Name, Required: requirement.Required, Path: resolution.Path, Healthy: err == nil}
+		if err != nil {
+			status.Error = err.Error()
+			if requirement.Required {
+				requiredErrors = append(requiredErrors, err)
+			}
+		} else if requirement.Environment != "" {
+			environment[requirement.Environment] = resolution.Path
+		}
+		statuses = append(statuses, status)
+	}
+	m.mu.Lock()
+	m.tools[id] = statuses
+	m.mu.Unlock()
+	if len(requiredErrors) > 0 {
+		return errors.Join(requiredErrors...).Error()
+	}
+	return ""
 }
 
 func (m *Manager) startBinary(id string) error {
@@ -446,8 +531,18 @@ func (m *Manager) reconcile() {
 			m.mu.Lock()
 			m.binaries[act.id] = act.bin
 			m.modTimes[act.bin.Path] = currentModTimes[act.bin.Path]
+			delete(m.blocked, act.id)
+			delete(m.tools, act.id)
 			m.mu.Unlock()
 
+			if reason := m.blockedDependency(act.id); reason != "" {
+				m.setBlocked(act.id, reason)
+				continue
+			}
+			if blocked := m.resolveComponentTools(act.id); blocked != "" {
+				m.setBlocked(act.id, blocked)
+				continue
+			}
 			if err := m.startBinary(act.id); err != nil {
 				slog.Error("failed to start updated binary", "id", act.id, "error", err)
 			}

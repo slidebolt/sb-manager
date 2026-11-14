@@ -136,6 +136,66 @@ func TestComponentEnvironmentIsScopedToTargetProcess(t *testing.T) {
 	}
 }
 
+func TestMissingRequiredToolBlocksOnlyComponentAndDependents(t *testing.T) {
+	dir := t.TempDir()
+	writeManagedBinary(t, dir, "blocked", `{"id":"blocked","kind":"service","contractVersion":1,"setup":{"mode":"required","category":"Core","tools":[{"id":"definitely-missing-tool","name":"Missing tool","source":"system","kind":"executable","required":true,"checks":[{"arguments":["-version"]}]}]}}`, "exit 99")
+	writeManagedBinary(t, dir, "dependent", `{"id":"dependent","kind":"service","contractVersion":1,"dependsOn":["blocked"]}`, "exit 99")
+	writeManagedBinary(t, dir, "healthy", `{"id":"healthy","kind":"service","contractVersion":1}`, "printf '{\"type\":\"ready\"}\\n'\n"+
+		"while IFS= read -r line; do case \"$line\" in *shutdown*) exit 0;; esac; done")
+
+	m := New(dir, "")
+	if err := m.discover(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.startAll(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	states := map[string]ComponentStatus{}
+	for _, status := range m.Status() {
+		states[status.ID] = status
+	}
+	if states["blocked"].State != "blocked" || states["dependent"].State != "blocked" {
+		t.Fatalf("blocked states = %#v", states)
+	}
+	if states["healthy"].State != "ready" {
+		t.Fatalf("healthy state = %#v", states["healthy"])
+	}
+}
+
+func TestResolvedToolPathIsScopedToTargetProcess(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := t.TempDir()
+	tool := filepath.Join(toolDir, "video-tool")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nprintf 'video-tool ready\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	valueFile := filepath.Join(dir, "tool-path")
+	manifest := `{"id":"media","kind":"service","contractVersion":1,"setup":{"mode":"required","category":"Core","tools":[{"id":"video-tool","name":"Video tool","source":"system","kind":"executable","environment":"VIDEO_TOOL_PATH","required":true,"checks":[{"arguments":["-version"],"contains":["ready"]}]}]}}`
+	writeManagedBinary(t, dir, "media", manifest, "printf '%s' \"$VIDEO_TOOL_PATH\" > '"+valueFile+"'\n"+
+		"printf '{\"type\":\"ready\"}\\n'\n"+
+		"while IFS= read -r line; do case \"$line\" in *shutdown*) exit 0;; esac; done")
+	m := NewWithEnvironment(dir, "", map[string]map[string]string{"media": {"VIDEO_TOOL_PATH": tool}})
+	if err := m.discover(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.startAll(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	raw, err := os.ReadFile(valueFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != tool {
+		t.Fatalf("tool path = %q, want %q", raw, tool)
+	}
+	status := m.Status()[0]
+	if len(status.Tools) != 1 || !status.Tools[0].Healthy || status.Tools[0].Path != tool {
+		t.Fatalf("tool status = %#v", status.Tools)
+	}
+}
+
 func mustManifest(t *testing.T, raw string) contract.HelloResponse {
 	t.Helper()
 	var m contract.HelloResponse
