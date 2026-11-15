@@ -21,16 +21,22 @@ import (
 )
 
 const (
-	readyTimeout    = 30 * time.Second
-	shutdownTimeout = 10 * time.Second
-	watchInterval   = 2 * time.Second
+	defaultReadyTimeout = 30 * time.Second
+	shutdownTimeout     = 10 * time.Second
+	watchInterval       = 2 * time.Second
 )
+
+type Options struct {
+	Environment  map[string]map[string]string
+	ReadyTimeout time.Duration
+}
 
 // Manager orchestrates binary lifecycle.
 type Manager struct {
-	binDir      string
-	overrideDir string
-	environment map[string]map[string]string
+	binDir       string
+	overrideDir  string
+	environment  map[string]map[string]string
+	readyTimeout time.Duration
 
 	mu        sync.Mutex
 	processes map[string]*process.Process // keyed by binary ID
@@ -52,22 +58,32 @@ func New(binDir, overrideDir string) *Manager {
 // NewWithEnvironment creates a manager with component-scoped environment
 // values supplied by an owning launcher such as SlideBolt Quickstart.
 func NewWithEnvironment(binDir, overrideDir string, environment map[string]map[string]string) *Manager {
+	return NewWithOptions(binDir, overrideDir, Options{Environment: environment})
+}
+
+func NewWithOptions(binDir, overrideDir string, options Options) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
+	environment := options.Environment
 	if environment == nil {
 		environment = map[string]map[string]string{}
 	}
+	readyTimeout := options.ReadyTimeout
+	if readyTimeout <= 0 {
+		readyTimeout = defaultReadyTimeout
+	}
 	return &Manager{
-		binDir:      binDir,
-		overrideDir: overrideDir,
-		environment: environment,
-		processes:   make(map[string]*process.Process),
-		binaries:    make(map[string]discovery.Binary),
-		modTimes:    make(map[string]time.Time),
-		restarts:    make(map[string]int),
-		tools:       make(map[string][]ToolStatus),
-		blocked:     make(map[string]string),
-		ctx:         ctx,
-		cancel:      cancel,
+		binDir:       binDir,
+		overrideDir:  overrideDir,
+		environment:  environment,
+		readyTimeout: readyTimeout,
+		processes:    make(map[string]*process.Process),
+		binaries:     make(map[string]discovery.Binary),
+		modTimes:     make(map[string]time.Time),
+		restarts:     make(map[string]int),
+		tools:        make(map[string][]ToolStatus),
+		blocked:      make(map[string]string),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -408,8 +424,8 @@ func (m *Manager) startBinary(id string) error {
 		slog.Info("ready", "id", id, "startup", time.Since(started).Round(time.Millisecond))
 	case <-p.Done:
 		return fmt.Errorf("%s exited before becoming ready: %v", id, p.Err)
-	case <-time.After(readyTimeout):
-		return fmt.Errorf("%s did not become ready within %s", id, readyTimeout)
+	case <-time.After(m.readyTimeout):
+		return fmt.Errorf("%s did not become ready within %s", id, m.readyTimeout)
 	}
 
 	// Monitor for crashes.

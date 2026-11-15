@@ -100,6 +100,20 @@ func TestStatusDoesNotInferReadyFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestNewWithOptionsUsesConfiguredReadyTimeout(t *testing.T) {
+	m := NewWithOptions(t.TempDir(), "", Options{ReadyTimeout: 2 * time.Minute})
+	if m.readyTimeout != 2*time.Minute {
+		t.Fatalf("ready timeout = %s, want 2m", m.readyTimeout)
+	}
+}
+
+func TestNewWithOptionsDefaultsInvalidReadyTimeout(t *testing.T) {
+	m := NewWithOptions(t.TempDir(), "", Options{ReadyTimeout: -1})
+	if m.readyTimeout != defaultReadyTimeout {
+		t.Fatalf("ready timeout = %s, want %s", m.readyTimeout, defaultReadyTimeout)
+	}
+}
+
 func TestDiscoverFailsWhenAnExecutableManifestIsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	writeManagedBinary(t, dir, "valid", `{"id":"valid","kind":"service","contractVersion":1}`, "printf '{\"type\":\"ready\"}\\n'")

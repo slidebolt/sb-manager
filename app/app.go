@@ -8,15 +8,17 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	managercore "github.com/slidebolt/sb-manager/internal/manager"
 )
 
 type Config struct {
-	BinDir      string
-	OverrideDir string
-	StatusAddr  string
-	Components  map[string]ComponentConfig
+	BinDir       string
+	OverrideDir  string
+	StatusAddr   string
+	ReadyTimeout time.Duration
+	Components   map[string]ComponentConfig
 }
 
 type ComponentConfig struct {
@@ -54,7 +56,9 @@ func Run(cfg Config) {
 	for id, component := range cfg.Components {
 		environment[id] = component.Environment
 	}
-	m := managercore.NewWithEnvironment(cfg.BinDir, cfg.OverrideDir, environment)
+	m := managercore.NewWithOptions(cfg.BinDir, cfg.OverrideDir, managercore.Options{
+		Environment: environment, ReadyTimeout: cfg.ReadyTimeout,
+	})
 	var statusServer *http.Server
 	if cfg.StatusAddr != "" {
 		mux := http.NewServeMux()
