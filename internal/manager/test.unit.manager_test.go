@@ -210,6 +210,42 @@ func TestResolvedToolPathIsScopedToTargetProcess(t *testing.T) {
 	}
 }
 
+func TestExternalResourceTransitionsComponentToDegradedWithoutRestart(t *testing.T) {
+	dir := t.TempDir()
+	manifest := `{"id":"camera","kind":"plugin","contractVersion":1,"definitions":{"name":"Camera","description":"Provides cameras."},"setup":{"mode":"selectable","category":"Cameras","fields":[{"key":"url","environment":"CAMERA_URL","name":"URL","control":"text"}],"resources":[{"id":"camera-api","kind":"service","name":"Camera API","description":"Provides camera state.","fields":["url"],"activation":{"mode":"always"}}]}}`
+	writeManagedBinary(t, dir, "camera", manifest,
+		"printf '{\"type\":\"resource_status\",\"payload\":{\"id\":\"camera-api\",\"state\":\"ready\",\"checkedAt\":\"2026-01-01T00:00:00Z\"}}\\n'\n"+
+			"printf '{\"type\":\"ready\"}\\n'\n"+
+			"sleep 0.05\n"+
+			"printf '{\"type\":\"resource_status\",\"payload\":{\"id\":\"camera-api\",\"state\":\"degraded\",\"checkedAt\":\"2026-01-01T00:00:01Z\",\"error\":{\"code\":\"unreachable\",\"message\":\"camera unavailable\",\"retryable\":true}}}\\n'\n"+
+			"while IFS= read -r line; do case \"$line\" in *shutdown*) exit 0;; esac; done")
+	m := New(dir, "")
+	if err := m.discover(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.startAll(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status := m.Status()[0]
+		if status.State == "degraded" {
+			if status.RestartCount != 0 || len(status.Resources) != 1 || status.Resources[0].LastError == nil || status.Resources[0].LastError.Code != "unreachable" {
+				t.Fatalf("degraded status = %#v", status)
+			}
+			m.handleRuntimeMessage("camera", contract.RuntimeMessage{Type: contract.RuntimeResourceStatus, Payload: json.RawMessage(`{"id":"camera-api","state":"ready","checkedAt":"2026-01-01T00:00:02Z"}`)})
+			recovered := m.Status()[0]
+			if recovered.State != "ready" || recovered.RestartCount != 0 || recovered.Resources[0].State != "ready" {
+				t.Fatalf("recovered status = %#v", recovered)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("component did not degrade: %#v", m.Status())
+}
+
 func mustManifest(t *testing.T, raw string) contract.HelloResponse {
 	t.Helper()
 	var m contract.HelloResponse

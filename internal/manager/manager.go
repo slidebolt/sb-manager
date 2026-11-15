@@ -44,6 +44,7 @@ type Manager struct {
 	modTimes  map[string]time.Time        // keyed by file path
 	restarts  map[string]int              // keyed by binary ID
 	tools     map[string][]ToolStatus
+	resources map[string]map[string]contract.ResourceStatus
 	blocked   map[string]string
 
 	ctx    context.Context
@@ -81,6 +82,7 @@ func NewWithOptions(binDir, overrideDir string, options Options) *Manager {
 		modTimes:     make(map[string]time.Time),
 		restarts:     make(map[string]int),
 		tools:        make(map[string][]ToolStatus),
+		resources:    make(map[string]map[string]contract.ResourceStatus),
 		blocked:      make(map[string]string),
 		ctx:          ctx,
 		cancel:       cancel,
@@ -96,6 +98,16 @@ type ToolStatus struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type ExternalResourceStatus struct {
+	ID            string                        `json:"id"`
+	Kind          contract.ExternalResourceKind `json:"kind"`
+	Name          string                        `json:"name"`
+	Description   string                        `json:"description"`
+	State         string                        `json:"state"`
+	LastCheckedAt time.Time                     `json:"lastCheckedAt,omitempty"`
+	LastError     *contract.ResourceError       `json:"lastError,omitempty"`
+}
+
 // ComponentStatus is a read-only, provider-neutral view of one managed binary.
 type ComponentStatus struct {
 	ID              string                      `json:"id"`
@@ -109,6 +121,7 @@ type ComponentStatus struct {
 	LastError       string                      `json:"lastError,omitempty"`
 	Definitions     *contract.PluginDefinitions `json:"definitions,omitempty"`
 	Tools           []ToolStatus                `json:"tools,omitempty"`
+	Resources       []ExternalResourceStatus    `json:"resources,omitempty"`
 }
 
 // Status returns a point-in-time snapshot without exposing process controls.
@@ -117,7 +130,7 @@ func (m *Manager) Status() []ComponentStatus {
 	defer m.mu.Unlock()
 	out := make([]ComponentStatus, 0, len(m.binaries))
 	for id, bin := range m.binaries {
-		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id], Definitions: bin.Manifest.Definitions, Tools: append([]ToolStatus(nil), m.tools[id]...)}
+		s := ComponentStatus{ID: id, Kind: string(bin.Manifest.Kind), State: "stopped", ContractVersion: bin.Manifest.ContractVersion, Dependencies: bin.Manifest.DependsOn, RestartCount: m.restarts[id], Definitions: bin.Manifest.Definitions, Tools: append([]ToolStatus(nil), m.tools[id]...), Resources: m.componentResources(bin)}
 		if reason := m.blocked[id]; reason != "" {
 			s.State, s.LastError = "blocked", reason
 		}
@@ -126,6 +139,15 @@ func (m *Manager) Status() []ComponentStatus {
 			s.State, s.StartedAt, s.ReadyAt = ps.State.String(), ps.StartedAt, ps.ReadyAt
 			if ps.State == process.StateRunning {
 				s.State = "ready"
+				for _, resource := range s.Resources {
+					if resource.State == string(contract.ResourceDegraded) {
+						s.State = "degraded"
+						if resource.LastError != nil {
+							s.LastError = fmt.Sprintf("resource %s: %s", resource.ID, resource.LastError.Message)
+						}
+						break
+					}
+				}
 			}
 			if ps.Err != nil {
 				s.LastError = ps.Err.Error()
@@ -135,6 +157,25 @@ func (m *Manager) Status() []ComponentStatus {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+func (m *Manager) componentResources(bin discovery.Binary) []ExternalResourceStatus {
+	if bin.Manifest.Setup == nil {
+		return nil
+	}
+	observed := m.resources[bin.Manifest.ID]
+	result := make([]ExternalResourceStatus, 0, len(bin.Manifest.Setup.Resources))
+	for _, definition := range bin.Manifest.Setup.Resources {
+		status := ExternalResourceStatus{ID: definition.ID, Kind: definition.Kind, Name: definition.Name, Description: definition.Description, State: "starting"}
+		if current, ok := observed[definition.ID]; ok {
+			status.State = string(current.State)
+			status.LastCheckedAt = current.CheckedAt
+			status.LastError = current.Error
+		}
+		result = append(result, status)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
 }
 
 // Run performs initial discovery and starts all binaries, then watches
@@ -391,6 +432,10 @@ func (m *Manager) startBinary(id string) error {
 	}
 
 	p := process.NewWithEnvironment(id, bin.Path, m.environment[id])
+	p.OnMessage = func(message contract.RuntimeMessage) { m.handleRuntimeMessage(id, message) }
+	m.mu.Lock()
+	m.resources[id] = map[string]contract.ResourceStatus{}
+	m.mu.Unlock()
 	slog.Info("starting", "id", id)
 
 	if err := p.Start(m.ctx); err != nil {
@@ -432,6 +477,42 @@ func (m *Manager) startBinary(id string) error {
 	go m.monitorCrash(id, p)
 
 	return nil
+}
+
+func (m *Manager) handleRuntimeMessage(componentID string, message contract.RuntimeMessage) {
+	if message.Type != contract.RuntimeResourceStatus {
+		return
+	}
+	var status contract.ResourceStatus
+	if err := json.Unmarshal(message.Payload, &status); err != nil {
+		slog.Warn("invalid resource status", "id", componentID, "error", err)
+		return
+	}
+	if status.State != contract.ResourceReady && status.State != contract.ResourceDegraded && status.State != contract.ResourceDisabled {
+		slog.Warn("invalid resource state", "id", componentID, "resource", status.ID, "state", status.State)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	bin, ok := m.binaries[componentID]
+	if !ok || bin.Manifest.Setup == nil {
+		return
+	}
+	declared := false
+	for _, definition := range bin.Manifest.Setup.Resources {
+		if definition.ID == status.ID {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		slog.Warn("undeclared resource status", "id", componentID, "resource", status.ID)
+		return
+	}
+	if m.resources[componentID] == nil {
+		m.resources[componentID] = map[string]contract.ResourceStatus{}
+	}
+	m.resources[componentID][status.ID] = status
 }
 
 func (m *Manager) monitorCrash(id string, p *process.Process) {
