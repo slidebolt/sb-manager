@@ -177,6 +177,36 @@ func TestMissingRequiredToolBlocksOnlyComponentAndDependents(t *testing.T) {
 	}
 }
 
+func TestStartupFailureBlocksOnlyComponentAndDependents(t *testing.T) {
+	dir := t.TempDir()
+	writeManagedBinary(t, dir, "failing", `{"id":"failing","kind":"service","contractVersion":1}`, "exit 1")
+	writeManagedBinary(t, dir, "dependent", `{"id":"dependent","kind":"service","contractVersion":1,"dependsOn":["failing"]}`, "exit 99")
+	writeManagedBinary(t, dir, "healthy", `{"id":"healthy","kind":"service","contractVersion":1}`, "printf '{\"type\":\"ready\"}\\n'\n"+
+		"while IFS= read -r line; do case \"$line\" in *shutdown*) exit 0;; esac; done")
+
+	m := New(dir, "")
+	if err := m.discover(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.startAll(); err != nil {
+		t.Fatalf("one component failure aborted startup: %v", err)
+	}
+	defer m.Shutdown()
+	states := map[string]ComponentStatus{}
+	for _, status := range m.Status() {
+		states[status.ID] = status
+	}
+	if states["failing"].State != "blocked" || states["failing"].LastError == "" {
+		t.Fatalf("failing component status = %#v", states["failing"])
+	}
+	if states["dependent"].State != "blocked" {
+		t.Fatalf("dependent status = %#v", states["dependent"])
+	}
+	if states["healthy"].State != "ready" {
+		t.Fatalf("unrelated component status = %#v", states["healthy"])
+	}
+}
+
 func TestResolvedToolPathIsScopedToTargetProcess(t *testing.T) {
 	dir := t.TempDir()
 	toolDir := t.TempDir()

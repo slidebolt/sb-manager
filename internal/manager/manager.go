@@ -358,7 +358,16 @@ func (m *Manager) startAll() error {
 			continue
 		}
 		if err := m.startBinary(id); err != nil {
-			return fmt.Errorf("manager: start %s: %w", id, err)
+			// A component is an isolation boundary. Record the failure and keep
+			// starting unrelated components; dependents will be blocked by the
+			// normal dependency check below. In particular, an unavailable
+			// optional integration must not take down the core runtime.
+			m.mu.Lock()
+			delete(m.processes, id)
+			m.mu.Unlock()
+			m.setBlocked(id, err.Error())
+			slog.Error("component startup failed", "id", id, "error", err)
+			continue
 		}
 	}
 	slog.Info("manager: startAll finished", "duration", time.Since(started).Round(time.Millisecond), "count", len(order))
@@ -527,6 +536,10 @@ func (m *Manager) monitorCrash(id string, p *process.Process) {
 		slog.Warn("crashed, restarting", "id", id)
 		time.Sleep(1 * time.Second)
 		if err := m.startBinary(id); err != nil {
+			m.mu.Lock()
+			delete(m.processes, id)
+			m.mu.Unlock()
+			m.setBlocked(id, err.Error())
 			slog.Error("restart failed", "id", id, "error", err)
 		}
 	}
